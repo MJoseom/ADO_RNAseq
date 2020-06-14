@@ -1,0 +1,553 @@
+---
+title: "Proceso de análisis de datos de ultrasecuenciación"
+subtitle: "PAC 2 - ANÁLISIS DE DATOS ÓMICOS (UOC)"
+author: "María José Ojeda-Montes"
+date: '`r format(Sys.Date(),"%e de %B, %Y")`'
+bibliography: biblio.bib
+csl: elsevier-vancouver.csl
+link-citations: yes
+header-includes: \usepackage[font={footnotesize}]{caption}
+output:
+  bookdown::html_document2:
+    number_sections: False
+    df_print: paged
+    fig_caption: yes
+    toc: yes
+    toc_depth: 3
+  pdf_document: 
+    fig_caption: yes
+    toc: true
+    toc_depth: 3
+  rmdformats::readthedown:
+    highlight: "pygments"
+    gallery: true
+    fig_width: 10
+    fig_height: 8
+    fig_caption: yes
+    use_bookdown: true
+    toc_depth: 3
+    number_sections: False
+params:
+  target_file: targets.csv
+  counts_file: counts.csv
+  seed: 12345
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+# Load packages
+library(knitr)
+library(dplyr)
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+library(ggbeeswarm)
+library(genefilter)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(EnsDb.Hsapiens.v86)
+```
+
+```{r, echo=FALSE, results='asis', eval=is_latex_output()}
+cat('\\pagebreak')
+```
+
+# ANÁLISIS DE ULTRASECUENCIACIÓN
+
+```{r directories, include=FALSE}
+workDir <- getwd()
+setwd(workDir)
+dir.create("data")
+dir.create("results")
+dir.create("figures")
+dataDir <- file.path(workDir, "data")
+resultsDir <- file.path(workDir, "results")
+figuresDir <- file.path(workDir, "figures")
+```
+
+## Obtención de los datos
+
+El objetivo principal de este estudio es **analizar el efecto en la expresión genética debido a la infiltración mediante métodos en tiroides.** 
+
+-- _Enlace al repositorio de github_: https://github.com/MJoseom/ADO_RNAseq
+
+El análisis de RNAseq se realiza a partir de los datos ya divididos en dos archivos: `r params$target_file` y `r params$counts_file` empleando las herramientas de Bioconductor. Para realizar la práctica, se han seguido diferentes tutoriales @rna1 @rna2 @rna3 @rna4.
+
++ **Archivo _`r params$target_file`_**
+
+```{r, include=FALSE, echo=FALSE}
+dataTarget <- read.csv(file.path(dataDir,params$target_file), header=TRUE, sep = ",", stringsAsFactors = F)
+# Show first lines
+head(dataTarget)
+# Dimensions 
+dim(dataTarget)
+# Structure of variables
+str(dataTarget)
+dataTarget[c(4:8)] <- lapply(dataTarget[c(4:8)], factor)
+# Summary of variables
+summary(dataTarget)
+# Null and missing values
+sum(is.na(dataTarget))
+sum(is.null(dataTarget))
+# Grupos
+table(dataTarget$Group)
+```
+
+Se trata del archivo de datos **`r params$target_file`** con `r dim(dataTarget)[1]` observaciones, en este caso corresponde a datos de expresión (RNA-seq) pertenecientes a un análisis del tiroides. Para cada observación, se han anotado `r dim(dataTarget)[2]` variables o características. En este caso, se compara tres tipos de infiltración: `r table(dataTarget$Group)[1]` muestras pertenecientes al grupo _Extensive lymphoid infiltrates_ (ELI), `r table(dataTarget$Group)[2]` muestras del grupo _Not infiltrated tissues_ (NIT) y `r table(dataTarget$Group)[3]` muestras del grupo _Small focal infiltrates_ (SFI). En la base de datos tenemos `r sum(is.na(dataTarget))` missing values y `r sum(is.null(dataTarget))` valores nulos. En este caso, las variables `r names(Filter(is.factor, dataTarget))` son consideradas factores. 
+
+Las variables o características consideradas son: `r names(dataTarget)`. 
+
++ **Archivo _`r params$counts_file`_**
+
+```{r, include=FALSE, echo=FALSE}
+dataCount <- read.csv(file.path(dataDir,params$counts_file), header=TRUE, sep = ";", row.names = 1)
+# Show first lines
+head(dataCount[1:4])
+# Dimensions 
+dim(dataCount)
+# Structure of variables
+str(dataCount[1:4])
+# Summary of variables
+summary(dataCount[1:6])
+# Null and missing values
+sum(is.na(dataCount))
+sum(is.null(dataCount))
+```
+
+Se trata del archivo de datos **`r params$counts_file`** con `r dim(dataCount)[2]` muestras para las que se han analizado la expresión de `r dim(dataCount)[1]` genes en tiroides anotados con el Gencode ID como índice de cada fila. En este caso, el nombre de las columnas de la matriz _Count_ coincide con la variable _Sample_Name_ de los datos del archivo **`r params$target_file`**. En la base de datos tenemos `r sum(is.na(dataCount))` missing values y `r sum(is.null(dataCount))` valores nulos. En este caso, las variables `r length(Filter(is.integer, dataCount))` son consideradas numéricas. 
+
+## Selección de un subset 
+
+Se realiza una selección de 30 muestras de forma aleatoria, 10 para cada grupo de estudio (NIT, SFI, ELI). 
+
+1. Determinar la distribución de los grupos de estudio en función del sexo
+
+```{r, include=TRUE, echo=FALSE}
+sexGroup <- round(prop.table(table(dataTarget$Group, dataTarget$sex))*100,2)
+kable(sexGroup, caption = 'Proporción en función del sexo y el grupo para la totalidad de los datos', digits = 5)
+```
+
+2. Seleccionar 10 muestras de cada grupo de forma aleatoria del archivo `r params$target_file`
+
+```{r, include=TRUE, echo=TRUE}
+set.seed(params$seed)
+# Selección del subset
+setTarget <- dataTarget %>% group_by(Group) %>% sample_n(10)
+# Modificación la notación de la columna de muestras para evitar errores con la matriz de Count
+setTarget$Sample_Name <- gsub("-", ".", setTarget$Sample_Name)
+# Exportación la tabla con el subset de Targets
+write.csv(setTarget, file= file.path(dataDir, "setTargets.csv"))
+```
+
+3. Analizar las características del dataSet
+
+```{r, include=FALSE, echo=FALSE}
+# Dimensions 
+dim(setTarget)
+# Structure of variables
+str(setTarget)
+# Summary of variables
+summary(setTarget)
+# Null and missing values
+sum(is.na(setTarget))
+sum(is.null(setTarget))
+```
+
+El dataset de _Targets_ creado seleccionando muestras aleatorias de cada uno de los grupos, presenta `r dim(setTarget)[1]` muestras para las que se han anotado `r dim(setTarget)[2]` características o variables. En este caso, disponemos de tres tipos de infiltración: `r table(setTarget$Group)[1]` muestras pertenecientes al grupo _Extensive lymphoid infiltrates_ (ELI), `r table(setTarget$Group)[2]` muestras del grupo _Not infiltrated tissues_ (NIT) y `r table(setTarget$Group)[3]` muestras del grupo _Small focal infiltrates_ (SFI). En la base de datos tenemos `r sum(is.na(setTarget))` missing values y `r sum(is.null(setTarget))` valores nulos.
+
+```{r, include=TRUE, echo=FALSE}
+sexGroup <- table(setTarget$Group, setTarget$sex)
+kable(sexGroup, caption = 'Número de muestras en función del sexo y el grupo para el dataset seleccionado', digits = 5)
+```
+
+En este caso, dado que se seleccionan el mismo número de muestras para todos los grupos, no se mantien la misma relación de muestras en función del sexo y del grupo. 
+
+```{r, include=TRUE, echo=FALSE}
+sampleName <- setTarget$Sample_Name
+```
+
+El identificador de las muestras seleccionadas para el dataset son:
+
+```{r, include=TRUE, echo=FALSE}
+kable(setTarget[c(3,7,8)], caption = 'Nombre de la muestra del dataSet', col.names = c("Muestra", "Sexo", "Tipo de infiltración"))
+```
+
+4. Seleccionar los datos de expresión génica correspondientes al dataset del archivo `r params$counts_file` 
+
+Buscamos la coincidencia de los identificadores de la tabla 3 en las columnas las columnas correspondientes a las muestras del dataSet. 
+
+```{r, include=TRUE, echo=TRUE}
+# Selección de las columnas con el identificador del dataset
+setCount <- dataCount[,  sampleName]
+# Eliminación de la versión en el nombre de cada gen con la notación de Ensambl
+row.names(setCount) <- sapply(strsplit(row.names(setCount), split = ".", fixed=TRUE), function(a) a[1])
+# Exportación la tabla con el subset de Counts
+write.csv(setCount, file= file.path(dataDir, "setCounts.csv"))
+```
+
+El dataset de _Counts_ creado presenta `r dim(setCount)[2]` muestras para las que se han analizado la expresión de `r dim(setCount)[1]` genes en tiroides anotados con el Gencode ID como índice de cada fila. En este caso, el nombre de las columnas coincide con los 10 muestras de cada grupo (_i.e._, NIT, SFI, ELI) seleccionados de forma aleatoria en la Tabla 3. En la base de datos tenemos `r sum(is.na(setCount))` missing values y `r sum(is.null(setCount))` valores nulos. 
+
+## Filtraje no específico
+
+En la matriz _setCount_ cada fila representa un gen con el código Ensembl y cada columna una librería de RNA secuenciada. Los valores corresponden a los datos sin procesar de fragmentos que se asignaron de forma única al gen respectivo en cada una de las librerías. Se empleará el paquete `Deseq2` para realizar el análisis de expresión diferencial de los datos obtenidos por ultrasecuenciación. En este caso se determina como condición el efecto del tipo de infiltración (_i.e._, NIT, SFI, ELI) para cada una de las muestras.
+
+```{r, include=TRUE, echo=TRUE}
+dds <- DESeqDataSetFromMatrix(countData = setCount,
+                                  colData = setTarget,
+                                  design = ~ Group)
+dds
+```
+
+
+```{r, include=FALSE, echo=FALSE}
+pre <- nrow(dds)
+dds <- dds[rowSums(counts(dds)) > 1, ]
+post <- nrow(dds)
+```
+
+En primer lugar, se realiza un filtro con el fin de eliminar todas aquellas filas que presentan únicamente 0 o bien un único valor de expresión genética. De este modo, se disminuye el tamaño de la matriz y aumentaremos la agilidad computacional. Así, pasamos de tener `r pre` genes a reducir la cantidad de genes representativos hasta `r post`.
+
+## Normalización
+
+Con el objetivo de estabilizar la varianza entre los diferentes contajes de expresión génica, se ha aplicado el método VST (variance stabilizing transformation) y el rlog (regularized-logarithm transformation) del propio paquete `DESseq2`.
+
++ VST
+
+```{r, include=TRUE, echo=TRUE}
+# VSD method
+vsd <- vst(dds, blind = FALSE)
+head(assay(vsd), 3)[,1:2]
+head(colData(vsd), 3)
+```
+
++ rlog
+
+```{r, include=TRUE, echo=TRUE}
+# rlog method
+rld <- rlog(dds, blind = FALSE)
+head(assay(rld), 3)[,1:2]
+```
+
+```{r, include=TRUE, echo=FALSE, fig.align='center', fig.width=6, fig.height=4, fig.cap= "Diagrama de dispersión de recuentos transformados de dos muestras por los métodos VST y rlog"}
+dds <- estimateSizeFactors(dds)
+df <- bind_rows(as_tibble(assay(vsd)[, 1:2]) %>% mutate(transformation = "vst"), 
+                as_tibble(assay(rld)[, 1:2]) %>% mutate(transformation = "rlog"))
+colnames(df)[1:2] <- c("x", "y")  
+
+ggplot(df, aes(x = x, y = y)) + geom_hex(bins = 80) +
+  coord_fixed() + facet_grid( . ~ transformation)  
+```
+
+La gráfica de dispersión de la Figura 1 nos muestra la transformación normalizada de _counts_  en las dos primeras muestras empleando el método VST y rlog. Observamos que el rango de valores de rlog para el eje de las `x` es de `r round(min(assay(rld)),1)` a `r round(max(assay(rld)),1)`, en cambio, el rango de valores para VST es menor para los valores inferiores, situándose en un rango de `r round(min(assay(vsd)),1)` a `r round(max(assay(vsd)),1)`.
+
+Un paso interesante en el análisis de RNAseq es determinar la similitud entre las muestras a partir de determinar la distancia entre éstas. 
+
+```{r, include=FALSE, echo=FALSE}
+sampleDists <- dist(t(assay(vsd)))
+```
+
+Para ello, realizamos una matriz de correlación de las distancias y con el fin de visualizarlas de una forma gráfica, realizamos un heatmap empleando el paquete `pheatmap`. 
+
+```{r, include=TRUE, echo=FALSE, fig.align='center', fig.width=6, fig.height=4, fig.cap= "Heatmap de distancias de muestra a muestra usando los valores transformados de VST"}
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$Group)
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "YlOrRd")))(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+En el heatmap de la Figura 2 observamos a partir del dendograma que hay 4 grandes clusters de muestras que presentan una cierta similitud. La distancia entre las muestras con mayor similitud, se encuentran con valores de 100 aproximadamente, tal y como se muestra en la paleta de colores del heatmap. Y éstas principalmente se concentran en los dos primeros clusters (primera rama izquierda del dendograma) pertenecientes a los grupos `NIT` y `SFI`. En general, las muestras de los diferentes grupos, se encuentran bastante agrupadas en el caso de la infiltración tipo `ELI` y la `NIT`. En cambio, las muestras del grupo `SFI` se encuentran más dispersas, mostrando mayor distancia entre ellas y por lo tanto, mayor variabilidad.
+
+```{r, include=TRUE, echo=FALSE, fig.align='center', fig.width=6, fig.height=4, fig.cap="Visualización de las dos primeras componentes principales del PCA usando los valores transformados de VST"}
+plotPCA(vsd, intgroup = "Group")
+```
+
+En el gráfico de la Figura 3 se han representado las dos primeras componentes del PCA (Principal Component Analysis) que explicarían el 72% de la variabilidad de las muestras, mayoritariamente por la PC1 que abarca el 64%. Observamos como en el caso anterior, que los grupos `NIT` y `ELI`, en menor medida, se encuentran agrupados. La variabilidad de la primera componente tiene una contribución muy alta del grupo `NIT`, que como podemos observar sitúa todas las muestras a la derecha de la gráfica, mientras que el grupo `ELI` se encuentra mayoritariamente a la izquierda. En cambio, las muestras de `SFI` se encuentran más repartidas por el centro del gráfico.
+
+```{r, include=TRUE, echo=FALSE, fig.align='center', fig.width=6, fig.height=4, fig.cap="Visualización de las distancias con una matriz basada en MDS usando los valores transformados de VST"}
+mds <- as.data.frame(colData(vsd))  %>%
+         cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x = `1`, y = `2`, color = Group, shape = sex)) +
+  geom_point(size = 3) + coord_fixed()
+```
+
+En el gráfico de la Figura 4, se muestra la distribución de los grupos empleando el Classical multidimensional scaling (MDS) para la matriz de distancias de los datos transformados de VST. El gráfico presenta un aspecto muy parecido al plot de PCA anterior (Figura 3), aunque en éste, además, se ha añadido la diferenciación por sexo, pero observamos que no hay un patrón claro entre las muestras de hombre o mujer. 
+
+## Identificación de genes diferencialmente expresados
+
+El parámetro `log2FoldChange` estima el cambio de expresión del gen debido al tratamiento, en este caso a los distintos métodos de infiltración. El parámetro `padj` corresponde al p-valor ajustado por el método Benjamini-Hochberg (BH). Con el fin de determinar que genes son signifcativos, podemos determinar un _threshold_ para estos parámetros. 
+
+Con el fin de ser lo restrictivos, establecemos un _threshold_ de 0.05 para el p-valor ajustado, mientras que dejamos el _threshold_ de `log2FoldChange` por defecto.
+
+```{r, include=FALSE, echo=FALSE, message=FALSE}
+dds <- DESeq(dds, parallel =TRUE)
+```
+
+Podemos realizar tres contrastes que comparen 2 a 2, los 3 grupos de infiltración en tiroides. 
+
+ **a) SFI-NIT**
+
+```{r, include=FALSE, echo=FALSE}
+SFIvsNIT <- results(dds, contrast=c("Group","SFI","NIT"), alpha = 0.05)
+head(SFIvsNIT,3)
+table(SFIvsNIT$padj < 0.05)
+```
+
+```{r, include=TRUE, echo=TRUE}
+summary(SFIvsNIT)
+```
+
+En este caso observamos que los porcentajes de `log2FoldChange` para el resumen del análisis son bastante bajos, de modo que esperamos que la diferencia de tratamiento tenga poca incidencia en la expresión génica. Como hemos visto en la distribución de las Figuras 3 y 4, las muestras de SFI presentan mayor variabilidad y en consecuencia, se reduce el impacto en la expresión génica entre las dos condiciones comparadas. En este caso, aplicando los criterios establecidos, obtenemos `r table(SFIvsNIT$padj < 0.05)[2]` genes diferencialmente expresados y se descartarían `r table(SFIvsNIT$padj < 0.05)[1]` genes.
+
+```{r, include=TRUE, echo=FALSE}
+topTab_SFIvsNIT <- subset(SFIvsNIT, padj < 0.05) 
+kable(head(topTab_SFIvsNIT[order(topTab_SFIvsNIT$log2FoldChange),], 5), caption = 'Genes diferencialmente expresados (downregulated) comparando las muestras de SFI y NIT (padj < 0.05). Tabla ordenada por log2FoldChange.', digits = 5, row.names = TRUE)
+kable(head(topTab_SFIvsNIT[order(topTab_SFIvsNIT$log2FoldChange, decreasing = T),], 5), caption = 'Genes diferencialmente expresados (upregulated) comparando las muestras de SFI y NIT (padj < 0.05). Tabla ordenada por log2FoldChange en orden inverso.', digits = 5, row.names = TRUE)
+```
+
+En las Tablas 4 y 5 se destacan los 5 genes que en condiciones de infiltración SFI o NIT presentan un expresión más significativa, bien sea upregulated o downregulated. El contraste de significancia presentan un p-valor ajustado menor a 0.05 y se encuentran ordenadas de acuerdo al `log2FoldChange`. La primera columna de estas tablas indica el código del gen en GenCode.
+
+ **b) ELI-NIT**
+
+```{r, include=FALSE, echo=FALSE}
+ELIvsNIT <- results(dds, contrast=c("Group","ELI","NIT"), alpha = 0.05)
+head(ELIvsNIT,3)
+table(ELIvsNIT$padj < 0.05)
+```
+
+```{r, include=TRUE, echo=TRUE}
+summary(ELIvsNIT)
+```
+
+En este caso observamos que los porcentajes de `log2FoldChange` para el resumen del análisis son algo mayor que en en caso anterior, especialmente en la expresión de genes upregulated, de modo, que esperamos mayor número de genes significativos. En este caso, en las Figuras 3 y 4 veíamos que las muestras de estos grupos se encontraban en posiciones opuestas, de modo que podemos intuir que el método de infiltración NIT y ELI provocan mayores cambios en la expresión génica. En consecuencia, aplicando los criterios establecidos, obtenemos `r table(ELIvsNIT$padj < 0.05)[2]` genes diferencialmente expresados y se descartarían `r table(ELIvsNIT$padj < 0.05)[1]` genes.
+
+```{r, include=TRUE, echo=FALSE}
+topTab_ELIvsNIT <- subset(ELIvsNIT, padj < 0.05) 
+kable(head(topTab_ELIvsNIT[order(topTab_ELIvsNIT$log2FoldChange),], 5), caption = 'Genes diferencialmente expresados (downregulated) comparando las muestras de ELI y NIT (padj < 0.05). Tabla ordenada por log2FoldChange.', digits = 5, row.names = TRUE)
+kable(head(topTab_ELIvsNIT[order(topTab_ELIvsNIT$log2FoldChange, decreasing = T),], 5), caption = 'Genes diferencialmente expresados (upregulated) comparando las muestras de ELI y NIT (padj < 0.05). Tabla ordenada por log2FoldChange en orden inverso.', digits = 5, row.names = TRUE)
+```
+
+En las Tablas 6 y 7 se destacan los 5 genes que en condiciones de infiltración ELI o NIT presentan un expresión más significativa, bien sea upregulated o downregulated. El contraste de significancia presentan un p-valor ajustado menor a 0.05 y se encuentran ordenadas de acuerdo al `log2FoldChange`. La primera columna de estas tablas indica el código del gen en GenCode.
+
+ **c) ELI-SFI**
+
+```{r, include=FALSE, echo=FALSE}
+ELIvsSFI <- results(dds, contrast=c("Group","ELI","SFI"), alpha = 0.05)
+head(ELIvsSFI, 3)
+table(ELIvsSFI$padj < 0.05)
+```
+
+```{r, include=TRUE, echo=TRUE}
+summary(ELIvsSFI)
+```
+
+En este caso observamos que los porcentajes de `log2FoldChange` para el resumen del análisis son igualmente bajos como en la primera comparación, de modo que esperamos que la diferencia de tratamiento tenga poca incidencia en la expresión génica. Como hemos visto en la distribución de las Figuras 3 y 4, las muestras de SFI presentan mayor variabilidad y en consecuencia, se reduce el impacto en la expresión génica entre las dos condiciones comparadas. En este caso, aplicando los criterios establecidos, obtenemos `r table(ELIvsSFI$padj < 0.05)[2]` genes diferencialmente expresados y se descartarían `r table(ELIvsSFI$padj < 0.05)[1]` genes.
+
+```{r, include=TRUE, echo=FALSE}
+topTab_ELIvsSFI <- subset(ELIvsSFI, padj < 0.05) 
+kable(head(topTab_ELIvsSFI[order(topTab_ELIvsSFI$log2FoldChange),], 5), caption = 'Genes diferencialmente expresados (downregulated) comparando las muestras de ELI y SFI (padj < 0.05). Tabla ordenada por log2FoldChange.', digits = 5, row.names = TRUE)
+kable(head(topTab_ELIvsSFI[order(topTab_ELIvsSFI$log2FoldChange, decreasing = T),], 5), caption = 'Genes diferencialmente expresados (upregulated) comparando las muestras de ELI y SFI (padj < 0.05). Tabla ordenada por log2FoldChange en orden inverso.', digits = 5, row.names = TRUE)
+```
+
+En las Tablas 8 y 9 se destacan los 5 genes que en condiciones de infiltración ELI o SFI presentan un expresión más significativa, bien sea upregulated o downregulated. El contraste de significancia presentan un p-valor ajustado menor a 0.05 y se encuentran ordenadas de acuerdo al `log2FoldChange`. La primera columna de estas tablas indica el código del gen en GenCode.
+
+## Anotación de los resultados
+
++ **Plot del gen más significativo entre tratamientos**
+
+```{r, include=TRUE, echo=FALSE, fig.align='center', fig.width=6, fig.height=4, fig.cap="plotCounts del gen maś significativo en cada una de las comparaciones de los tratamientos"}
+par(mfrow=c(1,3))
+# Plot SFI-NIT
+topGeneSFIvsNIT <- rownames(SFIvsNIT)[which.min(SFIvsNIT$padj)]
+geneCountsSFIvsNIT <- plotCounts(dds, gene = topGeneSFIvsNIT, intgroup = c("Group"),
+                         returnData = TRUE)
+ggplot(geneCountsSFIvsNIT, aes(x = Group, y = count, color = Group, group = Group)) +
+  scale_y_log10() + geom_point(size = 3) + geom_line()+ ggtitle(paste("Comparación SFI - NIT \nGene más significativo:",topGeneSFIvsNIT)) + theme(plot.title = element_text(color="Peru", size=12, face="bold"))
+
+# Plot ELI-NIT
+topGeneELIvsNIT <- rownames(ELIvsSFI)[which.min(ELIvsNIT$padj)]
+geneCountsELIvsNIT <- plotCounts(dds, gene = topGeneELIvsNIT, intgroup = c("Group"),
+                         returnData = TRUE)
+ggplot(geneCountsELIvsNIT, aes(x = Group, y = count, color = Group, group = Group)) +
+  scale_y_log10() + geom_point(size = 3) + geom_line()+ ggtitle(paste("Comparación ELI - NIT \nGene más significativo:",topGeneELIvsNIT)) + theme(plot.title = element_text(color="Peru", size=12, face="bold"))
+
+# Plot ELI-SFI
+topGeneELIvsSFI <- rownames(ELIvsSFI)[which.min(ELIvsSFI$padj)]
+geneCountsELIvsSFI <- plotCounts(dds, gene = topGeneELIvsSFI, intgroup = c("Group"),
+                         returnData = TRUE)
+ggplot(geneCountsELIvsSFI, aes(x = Group, y = count, color = Group, group = Group)) +
+  scale_y_log10() + geom_point(size = 3) + geom_line()+ ggtitle(paste("Comparación ELI - SFI \nGene más significativo:",topGeneELIvsSFI)) + theme(plot.title = element_text(color="Peru", size=12, face="bold"))
+```
+
+En las gráficas de plotCounts (Figuras 5, 6 y 7) se visibilizan los valores de _counts_ para el gen más significativo, es decir, para el gen con el p-valor ajustado menor en la comparación de los grupos. En los 3 casos, destacan dos aspectos: a) los valores de ELI son más altos que en los otros dos grupos y los de NIT tienden a ser los más bajos y b) las mayores diferencias de valores se observan entre ELI y NIT, dado que SFI suele tener valores intermedios. 
+
++ **Gene Clustering**
+
+```{r, include=TRUE, echo=FALSE, fig.align='center', fig.width=6, fig.height=4, fig.cap="Cluster de los genes con mayor variabilidad entre las muestras"}
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+mat <- assay(vsd)[topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, "Group"])
+colnames(anno) <- c("Group")
+rownames(anno) <- colnames(mat)
+pheatmap(mat, annotation_col = anno, fontsize_row = 8, fontsize_col = 6)
+```
+
+En la Figura 8 se muestra la expresión de los 20 genes con mayor variabilidad entre las muestras que se encuentran anotadas con el grupo al que pertenecen. Se observa que una gran mayoría de genes, 14 de los 20, presentan una expresion _downregulated_ especialmente en muestas del grupo NIT, mientras que para el resto se encuentran generalmente _upregulated_. En cambio, el primer cluster de genes (5 primeras filas) se expresan de forma diferencial en parte de las muestras NIT y SFI. 
+
+## Análisis de significación biológicas
+
+Una vez obtenemos la lista de genes expresados diferencialmente entre dos condiciones, debemos interpretar su relevancia biológica, es decir, conocer en que rutas metabólicas están implicados para conocer su función. Este análisis lo realizamos con la ayuda del paquete `clusterProfiler` que nos permite conocer dichas rutas de acuerdo al `Entrez ID` o al `Symbol` de cada gen.
+
+En las siguientes Tablas 10, 11 y 12 se han anotado el `Symbol`y el `Entrez ID` para cada uno de los genes significativamente diferenciados entre las distintas comparaciones. Aunque lamentablemente, algunos códigos no se encuentran en la base de datos de Bioconductor consultada (`org.Hs.eg.db` y `EnsDb.Hsapiens.v86`) probablemente dado que son transcritos. 
+
+ **a) SFI-NIT**
+ 
+```{r, include=TRUE, echo=FALSE, warning=FALSE}
+gendb <- EnsDb.Hsapiens.v86
+#columns(gendb)
+topTab_SFIvsNIT$symbol <- mapIds(gendb,
+                     keys=row.names(topTab_SFIvsNIT),
+                     column="SYMBOL",
+                     keytype="GENEID",
+                     multiVals="first")
+topTab_SFIvsNIT$entrez <- mapIds(gendb,
+                     keys=row.names(topTab_SFIvsNIT),
+                     column="ENTREZID",
+                     keytype="GENEID",
+                     multiVals="first")
+
+topTab_SFIvsNIT <- topTab_SFIvsNIT[order(topTab_SFIvsNIT$padj),]
+kable(head(topTab_SFIvsNIT, 5), caption = 'Genes diferencialmente expresados comparando las muestras de SFI y NIT (padj < 0.05)', digits = 5, row.names = TRUE)
+write.csv(topTab_SFIvsNIT, file= file.path(resultsDir, "results_SFIvsNIT.csv"))
+```
+
+```{r, include=TRUE, fig.width = 10, fig.asp = 1, fig.align="center", echo=FALSE, fig.cap="Barplot para los términos de EnrichmentGO para el análisis del tipo de infiltración SFI vs NIT en la expresión génica"}
+bio_SFIvsNIT <- enrichGO(topTab_SFIvsNIT$symbol, OrgDb = "org.Hs.eg.db", keyType = "SYMBOL")
+barplot(bio_SFIvsNIT, showCategory=40)
+```
+
+```{r, include=TRUE, fig.width = 10, fig.asp = 1, fig.align="center", echo=FALSE, fig.cap="Red para los términos de EnrichmentGO para el análisis del tipo de infiltración SFI vs NIT en la expresión génica"}
+cnetplot(bio_SFIvsNIT, node_label="all", showCategory = 4, colorEdge = TRUE)
+```
+
+En las Figura 9 y 10, observamos que gran parte de los genes diferenciados se encuentran involucrados en la unión a antígeno y al receptor de la immunoglobulina. 
+
+ **b) ELI-NIT**
+ 
+```{r, include=TRUE, echo=FALSE, warning=FALSE}
+topTab_ELIvsNIT$symbol <- mapIds(gendb,
+                     keys=row.names(topTab_ELIvsNIT),
+                     column="SYMBOL",
+                     keytype="GENEID",
+                     multiVals="first")
+topTab_ELIvsNIT$entrez <- mapIds(gendb,
+                     keys=row.names(topTab_ELIvsNIT),
+                     column="ENTREZID",
+                     keytype="GENEID",
+                     multiVals="first")
+
+topTab_ELIvsNIT <- topTab_ELIvsNIT[order(topTab_ELIvsNIT$padj),]
+kable(head(topTab_ELIvsNIT, 5), caption = 'Genes diferencialmente expresados comparando las muestras de ELI y NIT (padj < 0.05)', digits = 5, row.names = TRUE)
+write.csv(topTab_ELIvsNIT, file= file.path(resultsDir, "results_ELIvsNIT.csv"))
+```
+
+```{r, include=TRUE, fig.width = 10, fig.asp = 1, fig.align="center", echo=FALSE, fig.cap="Barplot para los términos de EnrichmentGO para el análisis del tipo de infiltración ELI vs NIT en la expresión génica"}
+bio_ELIvsNIT <- enrichGO(topTab_ELIvsNIT$symbol, OrgDb = "org.Hs.eg.db", keyType = "SYMBOL")
+barplot(bio_ELIvsNIT, showCategory=40)
+```
+
+```{r, include=TRUE, fig.width = 10, fig.asp = 1, fig.align="center", echo=FALSE, fig.cap="Red para los términos de EnrichmentGO para el análisis del tipo de infiltración ELI vs NIT en la expresión génica"}
+cnetplot(bio_ELIvsNIT, node_label="all", showCategory = 4, colorEdge = TRUE)
+```
+
+En las Figura 11 y 12, observamos que gran parte de los genes diferenciados se encuentran involucrados en la unión a antígeno y al receptor de la immunoglobulina. Además en este caso, también destacan con p-valores más altos pero significativos, los genes implicados en _cell adhesion molecule binding_, _small GTPase binding_ y _Ras GTPase binding_.
+
+ **c) ELI-SFI**
+ 
+```{r, include=TRUE, echo=FALSE, warning= FALSE}
+topTab_ELIvsSFI$symbol <- mapIds(gendb,
+                     keys=row.names(topTab_ELIvsSFI),
+                     column="SYMBOL",
+                     keytype="GENEID",
+                     multiVals="first")
+topTab_ELIvsSFI$entrez <- mapIds(gendb,
+                     keys=row.names(topTab_ELIvsSFI),
+                     column="ENTREZID",
+                     keytype="GENEID",
+                     multiVals="first")
+
+topTab_ELIvsSFI <- topTab_ELIvsSFI[order(topTab_ELIvsSFI$padj),]
+kable(head(topTab_ELIvsSFI, 5), caption = 'Genes diferencialmente expresados comparando las muestras de ELI y SFI (padj < 0.05)', digits = 5, row.names = TRUE)
+write.csv(topTab_ELIvsSFI, file= file.path(resultsDir, "results_ELIvsSFI.csv"))
+```
+
+```{r, include=TRUE, fig.width = 10, fig.asp = 1, fig.align="center", echo=FALSE, fig.cap="Barplot para los términos de EnrichmentGO para el análisis del tipo de infiltración ELI vs SFI en la expresión génica"}
+bio_ELIvsSFI <- enrichGO(topTab_ELIvsSFI$symbol, OrgDb = "org.Hs.eg.db", keyType = "SYMBOL")
+barplot(bio_ELIvsSFI, showCategory=40)
+```
+
+```{r, include=TRUE, fig.width = 10, fig.asp = 1, fig.align="center", echo=FALSE, fig.cap="Red para los términos de EnrichmentGO para el análisis del tipo de infiltración ELI vs SFI en la expresión génica"}
+cnetplot(bio_ELIvsSFI, node_label="all", showCategory = 4, colorEdge = TRUE)
+```
+
+En las Figura 13 y 14, observamos que en este caso, la función de los genes significativos se encuentra más repartida, destacando en este caso a diferencia de las comparaciones anteriores, _nucleoside-triphosphatase regulator activity_, _DNA-binding transcription activator activity, RNA polymerase II-specific_ y _protein serine/threonine kinase activity_.
+
+```{r, echo=FALSE, include=TRUE}
+listOfFiles <- dir(resultsDir)
+write.table(listOfFiles, file = "results_files.txt",  col.names = FALSE, row.names = FALSE)
+```
+
+```{r, echo=FALSE, results='asis', eval=is_latex_output()}
+cat('\\pagebreak')
+```
+
+# INFORME DEL ANÁLISIS
+
+**Identificación de la expresión transcripcional en muestras de tiroides**
+
+## Abstract
+
+El método de infiltración en tiroides se ha observado que puede afectar a la expresión genética. Para ello, se ha hecho un contaje de los tránscritos de 292 muestras, y se ha realizado un análisis de un subset de 30 de éstas distribuidas en los tres métodos de infiltración (_i.e._, SFI, NIT, ELI). Tras el análisis de la expresión de genes, se ha obtenido que hay una transcripción significativa principalmente entre los grupos NIT y ELI. Además, se ha observado que los genes se encuentra implicados en rutas metabólicas de unión a antígeno y al receptor de la immunoglobulina.
+
+## Introducción y Objetivo
+
+El objetivo principal de este estudio es **analizar el efecto en la expresión genética debido a la infiltración mediante métodos en tiroides.** 
+
+No obstante, para una mejor contextualización de los resultados, sería necesario mayor información del estudio en el que se han recogido los datos analizados. 
+
+## Materiales y Métodos
+
++ Diseño del estudio
+
+El estudio presenta un factor con 3 niveles, correspondiente a 3 métodos de infiltración en tiroides: a) _Extensive lymphoid infiltrates_ (ELI); b) _Not infiltrated tissues_ (NIT); c) _Small focal infiltrates_ (SFI). La muestra original de participantes del estudio se ha reducido a una muestra de 30 sujetos, distribuyendo 10 réplicas para cada uno de los grupos. Además se han anotado otras características como el sexo, el experimento o un código identificativo. 
+
+Para cada una de las muestras, se ha realizado un contaje de la expresión transcripcional de una serie de genes implicados en tiroides, en total se han analizado 56202 genes.
+
++ Diseño computacional
+
+EL análisis de los datos se ha llevado a cabo empleando la versión 3.6.1 de R, así como funciones y paquetes pertenecientes al proyecto Bioconductor destinados a un análisis RNAseq. Con el fin de optimizar el protocolo, se han seguido los tutoriales presentados recientemente para dicho análisis @rna1 @rna2 @rna3 @rna4.  
+
+## Resultados y Discusión
+
+El análisis de los datos se ha llevado a cabo en primer lugar analizando la calidad de los datos. De modo que el primer paso es realizar un filtraje no específico eliminando aquellos genes para los que no se han obtenido contajes. De este filto, obtenemos 43525 genes que potencialmente pueden ser significativos. A continuación, se realiza una normalización de los datos usando el método _variance stabilizing transformation_ (VST). 
+
+Seguidamente, se ha realizado un contraste en la que se ha especificado que los grupos a comparar son los tres métodos de infiltración, comparados dos a dos (SFI-NIT, ELI-NIT y ELI-SFI). Como resultado del test de significancia y aplicando cutoff para el p-valor ajustado con el método Benjamini and Hochberg menor a 0.05, se obtienen una serie de genes significativos para cada una de las comparaciones. Por último, se han analizado los términos de enrichment de GO database para agrupar los genes significativos en función de la ruta metabólica en la se ven implicada dichos genes. 
+
+De acuerdo con los resultados, se observa que hay mayores diferencias en la expresión de los grupos ELI y NIT, en cambio, las muestras de SFI presentan mayor variabilidad. Por lo tanto, se han obtenido 660, 4706 y 1619 genes significativos para las comparaciones SFI-NIT, ELI-NIT y ELI-SFI, respectivamente. La mayor parte de los genes significativos se encuentran  involucrados en funciones muy diversas que incluyen la unión a antígeno y al receptor de la immunoglobulina, cell adhesion molecule binding, small GTPase binding, Ras GTPase binding, nucleoside-triphosphatase regulator activity o DNA-binding transcription activator activity.
+
+## Conclusión
+
+Tras este informe, se ha conseguido analizar el contaje de genes transcritos aplicando un protocolo de RNAseq  con el fin de valorar la respuesta génica en muestras con diferentes métodos de infiltración en tiroides. Se ha comprendido la importancia de cada paso del análisis y se han obtenido múltiples figuras que nos dan una imagen de la calidad de los datos, de la significancia de los test de comparación y de la participación de genes sigficativos en rutas metabólicas. No obstante, se requiere mayor información del estudio con el fin de comprender el contexto de éste. Así como también se requiere una mejor comprensión de toda la información extraída de cada gráfico y un análisis más detallado de cada uno de los genes significativos. 
+
+## References
+
+
